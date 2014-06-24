@@ -4,11 +4,20 @@
 package deepcopy
 
 import (
+	"os"
+	"io/ioutil"
+	"time"
 	"fmt"
 	"reflect"
 	"sync"
 	"unsafe"
+	"runtime"
 )
+
+var _ = os.Stdout
+var _ = ioutil.Discard
+var _ = time.ANSIC
+var _ = runtime.GOMAXPROCS
 
 // basic copy algorithm:
 // 1) recursively scan object, building up a list of all allocated
@@ -51,8 +60,7 @@ type copyInfo struct {
 	copy        func(dst, obj reflect.Value, f *infoStore, m *memRanges)
 }
 
-var infoMap = make(map[reflect.Type]*copyInfo)
-var lock sync.Mutex
+var copyLock sync.Mutex
 
 // infoStore is essentially just a single map, but
 // is stored as two so that new types can be added
@@ -60,9 +68,7 @@ var lock sync.Mutex
 // map access. This works because the same functions
 // will be generated for any given type.
 //
-type infoStore struct {
-	info, newInfo map[reflect.Type]*copyInfo
-}
+type infoStore map[reflect.Type]*copyInfo
 
 // Copy makes a recursive deep copy of obj and returns the result.
 //
@@ -79,35 +85,13 @@ func Copy(obj interface{}) (r interface{}) {
 	var m memRanges
 	v := reflect.ValueOf(obj)
 
-	lock.Lock()
-	store := infoStore{infoMap, nil}
+	store := infoStore(make(map[reflect.Type]*copyInfo))
 	f := deepCopyInfo(&store, v.Type())
-	lock.Unlock()
 
 	f.ranges(v, &store, &m)
-	// Was reflect.Zero
 	dst := reflect.New(v.Type()).Elem()
 	f.copy(dst, v, &store, &m)
 
-	// If we have encountered some new types while traversing the
-	// data structure, add all the original types back into the map
-	// and set the map to the new map.
-	// This means that several goroutines can be using
-	// the func map concurrently without acquiring the lock
-	// for each access.
-	// As the overall number of types is likely to be relatively
-	// small and quickly asymptotic, the overhead of copying the
-	// entire map each time should be negligible.
-	// It doesn't matter if several goroutines add the same
-	// types, because they will all have identical functions.
-	if store.newInfo != nil {
-		lock.Lock()
-		for k, v := range store.info {
-			store.newInfo[k] = v
-		}
-		infoMap = store.newInfo
-		lock.Unlock()
-	}
 	return dst.Interface()
 }
 
@@ -130,9 +114,6 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 			obj := obj0
 			if !obj.IsNil() {
 				e := obj.Elem()
-				if !e.IsValid() {
-					fmt.Printf("nil elem of %s %s\n", obj.Type(), obj)
-				}
 				deepCopyInfo(store, e.Type()).ranges(e, store, m)
 			}
 		}
@@ -144,7 +125,6 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				// we cannot just pass dst to einfo.copy() because
 				// various types (e.g. arrays and structs) expect an
 				// actual instance of the type to modify
-				// Was reflect.Zero
 				v := reflect.New(e.Type()).Elem()
 				einfo.copy(v, e, store, m)
 				for !v.Type().AssignableTo(dst.Type()) {
@@ -182,7 +162,6 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				e.v = v
 				dst.Set(e.v)
 				if einfo.hasPointers {
-					// Was reflect.Zero
 					kv := reflect.New(t.Elem()).Elem()
 					for _, k := range obj.MapKeys() {
 						einfo.copy(kv, obj.MapIndex(k), store, m)
@@ -228,7 +207,6 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				e.v, e.allocAddr = e.make(e.memRange, e.t)
 			}
 			ptr := m0 - e.m0 + e.allocAddr
-			// This was a ValueOf
 			v := reflect.NewAt(t, unsafe.Pointer(&ptr)).Elem()
 			// make a copy only if we're pointing to the entire
 			// allocated object; otherwise the copy will be made
@@ -319,9 +297,7 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				Len:  obj.Len(),
 				Cap:  obj.Cap(),
 			}
-			fmt.Printf("Assigning %s with %s from unsafe pointer\n", dst.Type(), t)
 			fabricated := reflect.NewAt(t, unsafe.Pointer(&h)).Elem()
-			fmt.Printf("Fabricated a %s\n", fabricated.Type())
 			dst.Set(fabricated)
 
 			if e.m0 == m0 && e.m1 == m1 && !e.copied {
@@ -364,16 +340,20 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				dst := dst0
 				obj := obj0
 				for i, f := range einfo {
-					fmt.Printf("dst:%s obj:%s\n", dst.Type(), obj.Type())
+					// copyLock.Lock()
+					// time.Sleep(time.Millisecond)
+					// fmt.Fprintf(os.Stdout, "dst:                   %\n", 1, 2)
+					// os.Stdout.Sync()
 					dstEl := dst
 					for dstEl.Type().Kind() == reflect.Ptr {
-						dstEl = dst.Elem()
+						dstEl = dstEl.Elem()
 					}
 					dstEl = dstEl.Field(i)
 					srcEl := obj.Field(i)
 					for !srcEl.Type().AssignableTo(dstEl.Type()) {
 						srcEl = srcEl.Elem()
 					}
+					// copyLock.Unlock()
 					f.copy(dstEl, srcEl, store, m)
 				}
 			}
@@ -397,36 +377,24 @@ func shallowCopy(dst, obj reflect.Value, _ *infoStore, _ *memRanges) {
 }
 
 func (f *infoStore) get(t reflect.Type) *copyInfo {
-	if i := f.info[t]; i != nil {
-		return i
-	}
-	if f.newInfo != nil {
-		return f.newInfo[t]
-	}
-	return nil
+	return (*(*map[reflect.Type]*copyInfo)(f))[t]
 }
 
 func (f *infoStore) set(t reflect.Type, fns *copyInfo) {
-	if f.newInfo == nil {
-		f.newInfo = make(map[reflect.Type]*copyInfo)
-	}
-	f.newInfo[t] = fns
+	(*(*map[reflect.Type]*copyInfo)(f))[t] = fns
 }
 
 func makeSlice(r memRange, t0 reflect.Type) (v reflect.Value, allocAddr uintptr) {
 	t := t0
 	esize := t.Elem().Size()
 	n := (r.m1 - r.m0) / esize
-	fmt.Printf("Making []%s of size %d\n", t.Elem(), n)
 	s := reflect.MakeSlice(t, int(n), int(n))
 	return s, s.Pointer() - n*esize
 }
 
 func makeZero(_ memRange, t reflect.Type) (v reflect.Value, allocAddr uintptr) {
-	// Was reflect.Zero
-	v = reflect.New(t)
-	fmt.Printf("v is %s\n", v.Type())
-	return v, v.Pointer()
+	v = reflect.New(t).Elem()
+	return v, v.UnsafeAddr()
 }
 
 func (l *memRangeList) String() string {
@@ -457,6 +425,11 @@ func (m *memRanges) add(r memRange, t reflect.Type, mk func(r memRange, t reflec
 			// r is within s
 			return false
 		}
+		if r.m0 >= s.m0 && r.m0 < s.m1 && r.m1 > s.m1 {
+			// r and s overlap. s is before r, so we extend s and drop r.
+			s.m1 = r.m1
+			return false
+		}
 		if r.m0 <= s.m0 {
 			// r contains s (and possibly following ranges too),
 			// so delete s
@@ -464,8 +437,6 @@ func (m *memRanges) add(r memRange, t reflect.Type, mk func(r memRange, t reflec
 			// If r and s overlap, merge them by assigning r to their union
 			// before deleting s
 			if r.m1 < s.m1 {
-				fmt.Printf("Merging s={%d %d) into r={%d %d}\n",
-					s.m0, s.m1, r.m0, r.m1)
 				r.m1 = s.m1
 			}
 

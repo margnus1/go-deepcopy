@@ -1,6 +1,7 @@
 package deepcopy
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -42,7 +43,7 @@ func TestRangeAmalgamation(t *testing.T) {
 		j := 0
 		for rl := l.l; rl != nil; rl = rl.next {
 			if rl.m0 != outputs[i][j].m0 || rl.m1 != outputs[i][j].m1 {
-				t.Fatal("step %d, want %s, got %s", i, outputs[i], l)
+				t.Fatalf("step %d, want %s, got %s", i, outputs[i], l)
 			}
 			j++
 		}
@@ -213,12 +214,24 @@ func TestDeepCopy(t *testing.T) {
 	for i, test := range tests {
 		v1 := Copy(test.v)
 		if !simpleEq(test.v, v1) {
-			t.Errorf("simpleEq failure at %d on %v -> %v\n", i, test.v, v1)
+			t.Errorf("simpleEq failure at %d on %v -> %s\n", i, test.v,
+				recoveringSprintf("%v", v1))
 		}
 		if !test.eq(test.v, v1) {
-			t.Errorf("failure at %d on %v -> %v\n", i, test.v, v1)
+			t.Errorf("failure at %d on %v -> %s\n", i, test.v,
+				recoveringSprintf("%v", v1))
 		}
 	}
+}
+
+func recoveringSprintf(format string, args ...interface{}) (rv string) {
+	defer func() {
+		if r := recover(); r != nil {
+			rv = fmt.Sprintf("<panic %s>", r)
+		}
+	}()
+	rv = fmt.Sprintf(format, args...)
+	return
 }
 
 func BenchmarkCopyT1(b *testing.B) {
