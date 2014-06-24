@@ -3,6 +3,10 @@ go-deepcopy
 
 A polymorphic DeepCopy for Go using reflection.
 
+USERS BEWARE! This fix is held together by chewing gum and wire. In particular,
+there is a heisenbug that triggers if the copious amounts of debug-prints are
+removed. You've been warned.
+
 It is a fork of
 [code.google.com/r/jeffallen-fixes/exp/deepcopy](https://code.google.com/r/jeffallen-fixes/source/browse/#hg%2Fexp%2Fdeepcopy)
 which in turn is a clone of

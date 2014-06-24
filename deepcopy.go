@@ -26,11 +26,12 @@ type memRange struct {
 
 type memRangeList struct {
 	memRange
-	t         reflect.Type                                                          // type to be passed to make.
-	v         reflect.Value                                                         // newly allocated value.
-	allocAddr uintptr                                                               // address of newly allocated value.
-	copied    bool                                                                  // has this range been copied yet?
-	make      func(r memRange, t reflect.Type) (v reflect.Value, allocAddr uintptr) // allocate space for this range.
+	t         reflect.Type                           // type to be passed to make.
+	v         reflect.Value                          // newly allocated value.
+	allocAddr uintptr                                // address of newly allocated value.
+	copied    bool                                   // has this range been copied yet?
+	make      func(r memRange, t reflect.Type) (     // allocate space for this range.
+	          	v reflect.Value, allocAddr uintptr)
 	next      *memRangeList
 }
 
@@ -84,7 +85,8 @@ func Copy(obj interface{}) (r interface{}) {
 	lock.Unlock()
 
 	f.ranges(v, &store, &m)
-	dst := reflect.Zero(v.Type())
+	// Was reflect.Zero
+	dst := reflect.New(v.Type()).Elem()
 	f.copy(dst, v, &store, &m)
 
 	// If we have encountered some new types while traversing the
@@ -126,19 +128,29 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 	case reflect.Interface:
 		f.ranges = func(obj0 reflect.Value, store *infoStore, m *memRanges) {
 			obj := obj0
-			e := obj.Elem()
-			deepCopyInfo(store, e.Type()).ranges(e, store, m)
+			if !obj.IsNil() {
+				e := obj.Elem()
+				if !e.IsValid() {
+					fmt.Printf("nil elem of %s %s\n", obj.Type(), obj)
+				}
+				deepCopyInfo(store, e.Type()).ranges(e, store, m)
+			}
 		}
 		f.copy = func(dst, obj0 reflect.Value, store *infoStore, m *memRanges) {
-			e := obj0.Elem()
-			einfo := deepCopyInfo(store, e.Type())
+				if obj0.IsNil() { return }
+				e := obj0.Elem()
+				einfo := deepCopyInfo(store, e.Type())
 
-			// we cannot just pass dst to einfo.copy() because
-			// various types (e.g. arrays and structs) expect an 
-			// actual instance of the type to modify
-			v := reflect.Zero(e.Type())
-			einfo.copy(v, e, store, m)
-			dst.Set(v)
+				// we cannot just pass dst to einfo.copy() because
+				// various types (e.g. arrays and structs) expect an
+				// actual instance of the type to modify
+				// Was reflect.Zero
+				v := reflect.New(e.Type()).Elem()
+				einfo.copy(v, e, store, m)
+				for !v.Type().AssignableTo(dst.Type()) {
+					v = v.Elem()
+				}
+				dst.Set(v)
 		}
 
 	case reflect.Map:
@@ -170,7 +182,8 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				e.v = v
 				dst.Set(e.v)
 				if einfo.hasPointers {
-					kv := reflect.Zero(t.Elem())
+					// Was reflect.Zero
+					kv := reflect.New(t.Elem()).Elem()
 					for _, k := range obj.MapKeys() {
 						einfo.copy(kv, obj.MapIndex(k), store, m)
 						v.SetMapIndex(k, kv)
@@ -215,7 +228,8 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				e.v, e.allocAddr = e.make(e.memRange, e.t)
 			}
 			ptr := m0 - e.m0 + e.allocAddr
-			v := reflect.ValueOf(unsafe.Unreflect(t, unsafe.Pointer(&ptr)))
+			// This was a ValueOf
+			v := reflect.NewAt(t, unsafe.Pointer(&ptr)).Elem()
 			// make a copy only if we're pointing to the entire
 			// allocated object; otherwise the copy will be made
 			// later when we get to the pointer that does point
@@ -223,6 +237,9 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 			if m0 == e.m0 && m1 == e.m1 && !e.copied {
 				e.copied = true
 				einfo.copy(v.Elem(), obj.Elem(), store, m)
+			}
+			for !v.Type().AssignableTo(dst0.Type()) {
+				v = v.Elem()
 			}
 			dst0.Set(v)
 		}
@@ -249,7 +266,7 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 			f.copy = func(dst0, obj0 reflect.Value, store *infoStore, m *memRanges) {
 				dst := dst0
 				obj := obj0
-				reflect.ArrayCopy(dst, obj)
+				reflect.Copy(dst, obj)
 			}
 		}
 
@@ -263,8 +280,10 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				return
 			}
 			n := obj.Cap()
-			m1 := obj.Pointer()
-			m0 := m1 - uintptr(n)*esize
+			// m1 := obj.Pointer()
+			// m0 := m1 - uintptr(n)*esize
+			m0 := obj.Pointer()
+			m1 := m0 + uintptr(obj.Cap())*esize
 			if m.add(memRange{m0, m1}, obj.Type(), makeSlice) {
 				if einfo.hasPointers {
 					obj = obj.Slice(0, n)
@@ -281,8 +300,10 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 			}
 			dst := dst0
 			cap := obj.Cap()
-			m1 := obj.Pointer()
-			m0 := m1 - uintptr(obj.Cap())*esize
+			// m1 := obj.Pointer()
+			// m0 := m1 - uintptr(obj.Cap())*esize
+			m0 := obj.Pointer()
+			m1 := m0 + uintptr(obj.Cap())*esize
 			e := m.get(m0)
 			if e == nil {
 				panic("slice range not found")
@@ -293,8 +314,16 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 			}
 			// we must fabricate the slice, as we may be pointing
 			// to a slice of an in-struct array, rather than another slice.
-			h := reflect.SliceHeader{m0 - e.m0 + e.allocAddr, obj.Len(), obj.Cap()}
-			dst.Set(reflect.ValueOf(unsafe.Unreflect(t, unsafe.Pointer(&h))))
+			h := reflect.SliceHeader{
+				Data: m0 - e.m0 + e.allocAddr,
+				Len:  obj.Len(),
+				Cap:  obj.Cap(),
+			}
+			fmt.Printf("Assigning %s with %s from unsafe pointer\n", dst.Type(), t)
+			fabricated := reflect.NewAt(t, unsafe.Pointer(&h)).Elem()
+			fmt.Printf("Fabricated a %s\n", fabricated.Type())
+			dst.Set(fabricated)
+
 			if e.m0 == m0 && e.m1 == m1 && !e.copied {
 				e.copied = true
 				obj := obj.Slice(0, cap)
@@ -304,7 +333,7 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 						einfo.copy(dst.Index(i), obj.Index(i), store, m)
 					}
 				} else {
-					reflect.ArrayCopy(dst, obj)
+					reflect.Copy(dst, obj)
 				}
 			}
 		}
@@ -335,7 +364,17 @@ func deepCopyInfo(store *infoStore, t reflect.Type) (f *copyInfo) {
 				dst := dst0
 				obj := obj0
 				for i, f := range einfo {
-					f.copy(dst.Field(i), obj.Field(i), store, m)
+					fmt.Printf("dst:%s obj:%s\n", dst.Type(), obj.Type())
+					dstEl := dst
+					for dstEl.Type().Kind() == reflect.Ptr {
+						dstEl = dst.Elem()
+					}
+					dstEl = dstEl.Field(i)
+					srcEl := obj.Field(i)
+					for !srcEl.Type().AssignableTo(dstEl.Type()) {
+						srcEl = srcEl.Elem()
+					}
+					f.copy(dstEl, srcEl, store, m)
 				}
 			}
 		} else {
@@ -378,13 +417,16 @@ func makeSlice(r memRange, t0 reflect.Type) (v reflect.Value, allocAddr uintptr)
 	t := t0
 	esize := t.Elem().Size()
 	n := (r.m1 - r.m0) / esize
+	fmt.Printf("Making []%s of size %d\n", t.Elem(), n)
 	s := reflect.MakeSlice(t, int(n), int(n))
 	return s, s.Pointer() - n*esize
 }
 
 func makeZero(_ memRange, t reflect.Type) (v reflect.Value, allocAddr uintptr) {
-	v = reflect.Zero(t)
-	return v, v.Addr()
+	// Was reflect.Zero
+	v = reflect.New(t)
+	fmt.Printf("v is %s\n", v.Type())
+	return v, v.Pointer()
 }
 
 func (l *memRangeList) String() string {
@@ -418,15 +460,28 @@ func (m *memRanges) add(r memRange, t reflect.Type, mk func(r memRange, t reflec
 		if r.m0 <= s.m0 {
 			// r contains s (and possibly following ranges too),
 			// so delete s
+
+			// If r and s overlap, merge them by assigning r to their union
+			// before deleting s
 			if r.m1 < s.m1 {
-				panic("overlapping range")
+				fmt.Printf("Merging s={%d %d) into r={%d %d}\n",
+					s.m0, s.m1, r.m0, r.m1)
+				r.m1 = s.m1
 			}
+
 			*prev = s.next
 			continue
 		}
 		prev = &s.next
 	}
-	*prev = &memRangeList{r, t, nil, 0, false, mk, s}
+	*prev = &memRangeList{
+		memRange:  r,
+		t:         t,
+		allocAddr: 0,
+		copied:    false,
+		make:      mk,
+		next:      s,
+	}
 	return true
 }
 

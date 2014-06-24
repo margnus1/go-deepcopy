@@ -61,15 +61,11 @@ func simpleEq(v0, v1 interface{}) bool {
 
 var slice = []int{0, 1, 2, 3, 4, 5, 6}
 
-type uintPtrGetter interface {
-	Get() uintptr
-}
-
 func eqPtr(x, y interface{}) bool {
-	v := reflect.ValueOf(x).(uintPtrGetter)
-	w := reflect.ValueOf(y).(uintPtrGetter)
+	v := reflect.ValueOf(x)
+	w := reflect.ValueOf(y)
 
-	return v.Get() == w.Get()
+	return v.Pointer() == w.Pointer()
 }
 
 type T1 struct {
@@ -148,7 +144,7 @@ func TestDeepCopy(t *testing.T) {
 			t1,
 			func(x, y interface{}) bool {
 				y1 := y.(T1)
-				return eqPtr(y1.B, y1.C) && y1.A == &y1.C[1]
+				return eqPtr(y1.B[0:2], y1.C[2:4]) && y1.A == &y1.C[1]
 			},
 		},
 		copyTest{
@@ -174,7 +170,8 @@ func TestDeepCopy(t *testing.T) {
 			t3,
 			func(x, y interface{}) bool {
 				y1 := y.(T3)
-				return y1.A == y1.B
+				return reflect.ValueOf(y1.A).Pointer() ==
+					reflect.ValueOf(y1.B).Pointer()
 			},
 		},
 		copyTest{
@@ -184,7 +181,8 @@ func TestDeepCopy(t *testing.T) {
 			func(x, y interface{}) bool {
 				y1 := y.(map[*T2]map[string]int)
 				for _, v := range y1 {
-					if v == m {
+					if reflect.ValueOf(v).Pointer() ==
+						reflect.ValueOf(m).Pointer() {
 						return false
 					}
 					if v["one"] != 1 {
